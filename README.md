@@ -1,5 +1,5 @@
 # PCGKolect
-
+(test firmware)
 *Collecting heartbeats, one sample at a time.* ❤️🩺
 
 PCGKolect is an open-source firmware project for collecting high-quality heart sound recordings using a custom electronic stethoscope platform.
@@ -65,4 +65,4 @@ idf.py monitor
 
 ## License
 
-Specify the project license here.
+MIT License
