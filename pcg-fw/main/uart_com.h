@@ -6,6 +6,11 @@
 
 esp_err_t uart_com_init(void);
 
+esp_err_t uart_com_write(
+    const void *data,
+    size_t len
+);
+
 esp_err_t uart_com_send(
     const void *data,
     size_t len

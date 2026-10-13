@@ -1,12 +1,15 @@
 #include "usb_audio.h"
 
 #include "usb_device_uac.h"
-#include "pcm1803.h"
+#include "audio.h"
 
 #include <string.h>
 #include <stdint.h>
 
 static int s_usb_cb_count = 0;
+
+/* Microphone stream: 48 kHz, 16-bit mono, matching the UAC descriptor. */
+static audio_stream_t s_mic_stream = NULL;
 
 
 /* =========================
@@ -51,47 +54,22 @@ static esp_err_t usb_uac_device_input_cb(
 
     s_usb_cb_count++;
 
-    int16_t *out = (int16_t *)buf;
+    size_t got = 0;
+    esp_err_t ret = audio_read(s_mic_stream, buf, len, &got);
 
-    int32_t i2s_buf[960];
-
-    size_t i2s_bytes = 0;
-
-    esp_err_t ret =
-        pcm1803_read(
-            i2s_buf,
-            sizeof(i2s_buf),
-            &i2s_bytes
-        );
-    if (ret != ESP_OK || i2s_bytes == 0)
-    {
-        memset(buf, 0, len);
-
+    if (ret != ESP_OK || got < len) {
+        /* Never hand an underrun to the host: pad with silence. */
+        if (ret == ESP_OK && got < len) {
+            memset(buf + got, 0, len - got);
+        } else if (ret != ESP_OK) {
+            memset(buf, 0, len);
+            got = 0;
+        }
         *bytes_read = len;
-
         return ESP_OK;
     }
 
-    int samples =
-        i2s_bytes / sizeof(int32_t);
-
-    int out_samples =2*len / sizeof(int16_t);
-
-    if (samples > out_samples)
-    {
-        samples = out_samples;
-    }
-
-    int out_idx = 0;
-
-    for (int i = 0; i < samples; i += 2)
-    {
-        out[out_idx++] =
-            (int16_t)(i2s_buf[i] >> 16);
-    }
-    printf("\rsamples per cb: %d - i2s out: %d - buflen: %d     ",out_idx,samples, len);
-    *bytes_read =
-        out_idx * sizeof(int16_t);
+    *bytes_read = got;
     return ESP_OK;
 }
 
@@ -102,6 +80,16 @@ static esp_err_t usb_uac_device_input_cb(
 
 esp_err_t usb_audio_init(void)
 {
+    audio_config_t mic_cfg = {
+        .sample_rate = 48000,
+        .bits = AUDIO_BITS_16,
+    };
+
+    s_mic_stream = audio_setup(&mic_cfg);
+    if (s_mic_stream == NULL) {
+        return ESP_FAIL;
+    }
+
     uac_device_config_t config = {
         .output_cb = usb_uac_device_output_cb,
         .input_cb = usb_uac_device_input_cb,

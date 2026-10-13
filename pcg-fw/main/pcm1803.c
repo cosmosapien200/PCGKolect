@@ -15,7 +15,7 @@ esp_err_t pcm1803_init(void)
             I2S_ROLE_SLAVE
         );
         
-    chan_cfg.dma_frame_num = 480;
+    chan_cfg.dma_frame_num = PCM1803_DMA_FRAMES;
     chan_cfg.dma_desc_num = 2;
     printf("dma_frame_num=%lu\n", chan_cfg.dma_frame_num);
     printf("dma_desc_num=%lu\n", chan_cfg.dma_desc_num);

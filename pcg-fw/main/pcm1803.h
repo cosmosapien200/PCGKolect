@@ -7,6 +7,10 @@
 
 #define PCM1803_SAMPLE_RATE 48000
 
+/* Number of stereo frames per I2S DMA block (must match dma_frame_num in
+ * pcm1803.c). One i2s_channel_read() returns at most this many frames. */
+#define PCM1803_DMA_FRAMES 480
+
 esp_err_t pcm1803_init(void);
 
 i2s_chan_handle_t pcm1803_get_rx_handle(void);

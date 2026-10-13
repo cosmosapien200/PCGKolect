@@ -1,5 +1,166 @@
 # Development Log
 
+## 2026-10-11 — End-to-End PCG Link Verified; RV1103 Receiver Fixes
+
+### Milestone
+
+* Verified the ESP32 → RV1103 8 kHz/16-bit PCG link **end to end**: the receiver
+  (`PCGKolect_rk` `PcgStream`) now decodes ~10 frames/s with `crc_errors == 0`.
+* Fixed two bugs in the RV1103 receiver that had blocked decoding:
+  1. **Baud:** `cfsetispeed`/`cfsetospeed` were given the number `460800`
+     instead of the termios constant `B460800`, leaving the port at 921600.
+  2. **Framing off-by-one:** the parser consumed only the first sync byte
+     `0xA5`, misreading the second (`0x5A`) as `LEN` lo, so conforming frames
+     could never decode.
+
+### Verification
+
+* Before: `frames=0 crc_err=0 bytes≈23,450 B/s`, `/proc/tty/driver/serial`
+  framing errors climbing.
+* After: `stty` reports `460800 baud`; `bytes` deltas exactly `21 × 1607`;
+  rate `16,025 B/s`; `fe`/`brk` unchanged; 1 CRC error over 308 frames
+  (correlated with a UART overrun `oe`, self-recovering).
+* No change needed on the ESP32 sender.
+
+### Full report
+
+* `PCGKolect_rk/docs/uart_receiver_fix_report.md`
+
+---
+
+## 2026-10-11 — UART PCG Streaming to RV1103 (`uart_audio`)
+
+### Milestone
+
+* Added `uart_audio.c` / `uart_audio.h`: streams mono **8 kHz / 16-bit** PCG
+  audio to the RV1103 over UART1 as framed packets, ~10 frames/s.
+* Added `uart_com_write()` (raw `uart_write_bytes()`, no flush) and enlarged the
+  UART TX ring buffer to 4096 B.
+* Bumped the audio ring buffer from 8192 → 16384 canonical samples (64 KB
+  internal SRAM, ~340 ms at 48 kHz) for extra margin under the 8 kHz consumer.
+* Documented the shared wire protocol in `docs/uart_pcg_protocol.md`.
+
+---
+
+### Motivation
+
+The RV1103 receiver (`PcgStream`) expects a self-synchronising, CRC-checked
+frame stream rather than raw PCM, so the ESP32 sender must emit that exact
+format. The sender is a consumer of the `audio` abstraction, opening an 8 kHz /
+16-bit stream while USB continues at 48 kHz / 16-bit.
+
+---
+
+### Protocol (sender side)
+
+```
+A5 5A | LEN(2, LE) | SEQ(1) | PCM(int16 LE, LEN bytes) | CRC16(2, LE)
+LEN = 1600 (800 samples), total 1607 B, ~10 frames/s
+CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF) over LEN+SEQ+PCM, stored LE
+```
+
+* Sync `0xA5 0x5A`; `SEQ` wraps at 256; PCM is mono little-endian `int16`.
+* Bandwidth: 8000 × 2 = 16,000 B/s vs ~46,080 B/s at 460800 (≈35 %).
+
+---
+
+### Implementation notes
+
+* The sender task blocks in `audio_read()` for exactly 800 samples (100 ms),
+  builds a 1607-byte frame into a static buffer, and calls `uart_com_write()`.
+* **TX buffer sizing matters**: a frame takes ~35 ms on the wire at 460800. With
+  a 256-byte TX buffer `uart_write_bytes()` would block ~35 ms, stretching the
+  cadence past 100 ms and overrunning the ring. At 4096 B the write queues the
+  whole frame and returns immediately; the driver drains it in the background.
+* `main.c` no longer sends `"Hello World"` on UART1 — interleaving text would
+  corrupt the binary stream. It now logs `uart_audio` stats once per second.
+* A boot self-test validates the protocol test vectors (CRC `0x29B1`,
+  small-frame `A5 5A 04 00 01 01 00 02 00 8F 8A`) and logs `PASS`.
+
+---
+
+### Verification
+
+* Host test (`/tmp/opencode/uart_frame_test.c`): CRC known-answer, small-frame
+  byte-for-byte, and standard 1607-byte silence frame (`CRC = 0x5E22`) all pass.
+* On-device (ESP32-S3, `/dev/ttyACM0`):
+  * `UART_AUDIO: protocol self-test: PASS`
+  * `stream open: 8000 Hz, 16-bit, decim=6`
+  * `frames` incremented **exactly 10/s** (10 → 140 over 13 s) = 8000 samples/s
+  * `read_err=0`, `write_err=0`; no WDT; USB stream unaffected.
+* Not yet verified on the wire (UART1 GPIO17/18 is not wired to this host) or by
+  the RV1103 receiver end-to-end.
+
+---
+
+## 2026-10-11 — Audio Abstraction Layer
+
+### Milestone
+
+* Introduced `audio.c` / `audio.h`, an abstraction layer between the PCM1803A
+  I2S driver and its consumers.
+* Moved channel selection, resampling and bit-depth conversion out of
+  `usb_audio.c` and into the new layer.
+
+---
+
+### Motivation
+
+Previously `usb_uac_device_input_cb` did all the DSP inline: it read the I2S
+stream, dropped the right channel, and shifted 32-bit slots down to 16-bit. Any
+new consumer (e.g. a future UART audio stream at a different rate) would have
+had to duplicate that logic. A dedicated layer centralizes it.
+
+---
+
+### Architecture
+
+* A single **producer task** owns the I2S read path. It reads one DMA block,
+  takes the left channel (`raw >> 8` → canonical 24-bit) and writes it into an
+  8192-sample ring buffer.
+* Consumers open an `audio_stream_t` with `audio_setup(&cfg)` where `cfg`
+  carries a **sample rate** and **bit depth**. Each stream has its own read
+  cursor and decimation factor, so multiple rates share one hardware stream.
+* Decimation is a **box average** over `48000 / sample_rate` samples (basic
+  anti-aliasing) — cheap and adequate for heart sounds (< 1 kHz).
+* Bit depth conversion: `s24`, `s24 >> 8`, `s24 >> 16` for 24/16/8-bit.
+
+---
+
+### API
+
+```c
+esp_err_t      audio_init(void);                    // idempotent; pcm1803 + ring + task
+audio_stream_t audio_setup(const audio_config_t *cfg);
+esp_err_t      audio_read(audio_stream_t s, void *buf, size_t size, size_t *bytes_read);
+void           audio_stream_close(audio_stream_t s);
+```
+
+---
+
+### Changes
+
+| File | Change |
+| ---- | ------ |
+| `main/audio.c`, `main/audio.h` | **New** abstraction layer (ring buffer, producer task, streams) |
+| `main/usb_audio.c` | Reduced to a thin `audio_read()` consumer (48 kHz / 16-bit) |
+| `main/main.c` | No longer calls `pcm1803_init()` directly |
+| `main/pcm1803.h` | Added `PCM1803_DMA_FRAMES` (480) |
+| `main/CMakeLists.txt` | Added `audio.c` |
+
+**Result**: Build clean; USB audio output is bit-identical to the previous
+`raw >> 16` path at 48 kHz/16-bit. The `audio` layer is now the single place to
+add future consumers such as UART audio (8 kHz / 16-bit).
+
+---
+
+### Next
+
+* `uart_audio` module: read an 8 kHz / 16-bit stream and stream it over UART to
+  the RV1103.
+
+---
+
 ## 2026-09-04 — UAC Audio Pipeline Bring-Up
 
 ### Milestone

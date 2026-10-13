@@ -10,6 +10,11 @@ static const char *TAG = "uart_com";
 #define UART_COM_RX_PIN    18
 #define UART_COM_BAUDRATE  460800
 
+/* TX ring buffer must hold at least one uart_audio frame (1607 B) so that
+ * uart_write_bytes() never blocks on the wire and delays the audio task. */
+#define UART_COM_RX_BUFFER 256
+#define UART_COM_TX_BUFFER 4096
+
 // No handle needed in ESP-IDF v6.x — UART APIs use uart_port_t directly
 
 esp_err_t uart_com_init(void)
@@ -27,8 +32,8 @@ esp_err_t uart_com_init(void)
     ESP_ERROR_CHECK(
         uart_driver_install(
             UART_COM_PORT,
-            256, // RX buffer size (0 = default 256)
-            256, // TX buffer size (0 = default 256)
+            UART_COM_RX_BUFFER,
+            UART_COM_TX_BUFFER,
             0, // Queue size (not used in simple mode)
             NULL,
             0
@@ -59,6 +64,28 @@ esp_err_t uart_com_init(void)
     ESP_LOGI(TAG, "UART initialized: port=%d, TX=%d, RX=%d, baud=%d",
              UART_COM_PORT, UART_COM_TX_PIN, UART_COM_RX_PIN,
              UART_COM_BAUDRATE);
+
+    return ESP_OK;
+}
+
+esp_err_t uart_com_write(
+    const void *data,
+    size_t len
+)
+{
+    if (data == NULL || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Blocks only when the TX ring buffer is full; with UART_COM_TX_BUFFER
+    // sized to hold a full audio frame this returns immediately and the
+    // driver drains the bytes in the background.
+    int written = uart_write_bytes(UART_COM_PORT, data, len);
+
+    if (written < 0) {
+        ESP_LOGE(TAG, "UART write failed");
+        return ESP_FAIL;
+    }
 
     return ESP_OK;
 }
