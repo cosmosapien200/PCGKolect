@@ -309,3 +309,121 @@ Resulting layout:
 * `i2s_channel_read()` returns one DMA block at a time.
 * Verify clock tree before debugging higher-level audio issues.
 * ESP-IDF I2S DMA is often sufficient without an additional ring buffer.
+
+---
+
+## 2026-10-14 — RV1103 link v1: typed frames, 4 Mbaud, control plane
+
+Goal: carry control commands, telemetry and recording-file transfer on the
+**existing** duplex UART (GPIO17 TX / GPIO18 RX ↔ RV `/dev/ttyS3`) without
+breaking the audio stream. Spec: `PCGKolect_app/docs/PROTOCOL.md`.
+
+### What changed
+* `uart_com.c` replaced by `link.c`: one TX mutex so whole frames never
+  interleave, an RX parser for RV→ESP frames, request/response with ids,
+  retries and timeouts, chunk reads, and a supervisor task.
+* New message frame `A5 5C | LEN | TYPE | SEQ | DATA | CRC16` alongside the
+  unchanged audio frame `A5 5A`. Types: REQ, RSP, EVT, CHUNK.
+* `console.c`: debug console on UART0 (`req <json>`, `baud`, `flood`,
+  `rbench`, `stats`), driven from the PC by `tools/esp_console.py`.
+* Flash size corrected to 16 MB (`esptool flash-id`), custom partition table
+  with a 4 MB factory app for the coming BLE + Wi-Fi stack.
+
+### Baud benchmark (audio streaming, RV NPU running)
+
+| Baud | RV→ESP stream | request/response | errors |
+|---|---|---|---|
+| 460 800 | 40 KB/s | 32 KB/s | 0 |
+| 1 500 000 | 129 KB/s | 79 KB/s | 2 audio frames |
+| 3 000 000 | 254 KB/s | 100 KB/s | 0 |
+| **4 000 000** | **334 KB/s** | **128 KB/s** | **0 in 18 MB soak** |
+
+RV1103 UART3 clocks are exact at 1.5/3/4 Mbaud and 4 Mbaud is exact on the
+ESP32-S3 (80 MHz / 20), so 4 Mbaud is the target. Both sides boot at 460800;
+the supervisor negotiates up, and both fall back after silence (ESP or RV
+reboot) and renegotiate.
+
+### Bugs found on the way
+* **Console starvation:** `uart_flush_input()` waits on the driver RX mutex
+  that the higher-priority `link_rx` task re-takes in a loop, so the console
+  task hung while holding the TX lock and audio stopped. Removed the flush;
+  the parser resynchronises by itself.
+* **Response replay after reboot:** the RV caches responses by request id;
+  after an ESP reset ids restarted at 1 and old answers were replayed. Ids now
+  start from a random base per boot.
+* Opening `/dev/ttyACM0` resets the ESP (auto-reset circuit); tests that need
+  continuity run in one console session.
+
+---
+
+## 2026-10-14 — BLE control service (CP3)
+
+* NimBLE peripheral (`ble.c`), service `7a1c0001-…` with Info / Command / Response /
+  Telemetry / Wi-Fi characteristics; JSON messages fragmented with a 1-byte header
+  (FIRST/LAST/index) so they work at any MTU (tested at BlueZ's default 23).
+* Command characteristic requires an encrypted link (LE Secure Connections, Just Works,
+  bonds persisted in NVS); `delete`, `clear`, `wifi_*` additionally require a bonded link.
+* Commands are queued from the GATT callback and handled on `ble_cmd`: `hello` merges ESP
+  info (device id from the BT MAC, firmware, link state) with the RV `hello`; other ops are
+  forwarded over the link with the app's id restored in the answer.
+* Telemetry: RV status events are tagged `"src":"rv","link_up":true` and notified at ≤ 5 Hz;
+  with the link down the ESP sends its own `LINK_DEGRADED` status every 2 s.
+* PSRAM (2 MB, quad) enabled; NimBLE allocates from it.
+* `tools/ble_client.py` (bleak): desk test client — pair, run ops, print telemetry.
+
+Verified from a Linux PC: pair + bond, hello/status/manifest, guarded delete rejected by the
+RV, unknown op → UNSUPPORTED, telemetry notifications, writes refused before pairing.
+
+---
+
+## 2026-10-14 — Wi-Fi station + local HTTP API (CP4)
+
+* `wifi_sta.c`: station mode on the phone hotspot. `wifi_set` (bonded BLE only) stores the
+  credentials in our own NVS namespace (Wi-Fi driver storage = RAM) so the device rejoins
+  after reboot; `wifi_forget` erases them. Reconnect with backoff (2 s → 10 s → 30 s) and
+  states off/connecting/connected/failed with reasons (NO_AP_FOUND, AUTH_FAILED, …), notified
+  on the Wi-Fi characteristic. Modem sleep is kept (required with BLE coexistence).
+* HTTP bearer token: 128-bit random, rotated on every BLE connection, returned only in the
+  `wifi_status` answer on a bonded link (never in notifications/logs); compared in constant time.
+* `http_api.c` (`esp_http_server`, port 8080, one request at a time, priority below audio):
+  `/v1/health`, `/v1/device`, `/v1/stats` (RV stats + ESP heap/RSSI/link counters),
+  `/v1/recordings` (pages the RV manifest), `/v1/recordings/{id}/{audio|metadata|sidecars/…}`
+  streamed in 4 KB link reads with `Content-Length`, `Range` → 206, `X-Content-SHA256`,
+  `POST /v1/transfers/{id}/{ack|delete}`, `POST /v1/recordings/clear`. RV statuses map to
+  HTTP 400/404/409/502/503/504.
+
+Verified over BLE: token only in bonded answers and rotated per connection, invalid
+credentials rejected, absent network → failed/NO_AP_FOUND with retries, forget → off; audio
+link unaffected (10 frames/s, no new gaps). HTTP endpoints still need a network test on a
+real hotspot/LAN (no Wi-Fi adapter on the dev PC).
+
+---
+
+## 2026-10-14 — Real-phone integration (Xiaomi, Android 14)
+
+### BLE responses never arrived on the phone
+The phone negotiated MTU 517 and the ESP sent 514-byte notification fragments. The phone
+received only the small *last* fragment of every response (header `0x41`: LAST, index 1) and
+silently dropped the first. Telemetry (< 330 B, one fragment) arrived. The PC (BlueZ, MTU 23)
+never hit this. **Fix:** fragments are capped at 244 B (one LE data packet with DLE) on both
+ESP and app.
+
+### HTTP downloads stalled at ~15 KB/s, then failed
+With Wi-Fi + BLE active, 4 KB chunk reads from the RV failed repeatedly and the RV logged ~50
+lost audio frames/hour. The UART ISR shared core 0 with Wi-Fi/BLE, and the default RX FIFO
+full threshold (120 of 128 bytes) left only ~20 µs of latency budget at 4 Mbaud.
+**Fix:** the UART driver is installed from a task pinned to core 1 (so its ISR lives there),
+the full threshold is 32 bytes (~240 µs), audio producer/sender and link tasks are pinned to
+core 1, chunk reads retry 6 × 300 ms.
+
+### Internal RAM exhaustion
+After the BLE + Wi-Fi + HTTP stack was added, free internal RAM was 21 KB: Wi-Fi association
+(`m f assoc req`) and the BLE controller (`Malloc failed`) failed. Putting the UART ISR in
+IRAM made it worse and was reverted. **Fix:** the 64 KB audio ring is in PSRAM
+(`EXT_RAM_BSS_ATTR`), Wi-Fi/LWIP may allocate from PSRAM, link buffers shrank → 101 KB free.
+
+### Result (end to end with the app)
+Pair → activate dataset → auto-start on a real heart → DONE (30.7 s usable, 37 beats) →
+download over the phone hotspot at ~62 KB/s with SHA-256 verification and resume. Audio link
+over 60 s with Wi-Fi up: 0 lost frames, 0 CRC errors. After a reset the ESP rejoins the
+hotspot from NVS in ~4 s.
