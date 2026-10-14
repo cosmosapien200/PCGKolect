@@ -114,9 +114,9 @@ esp_err_t uart_audio_init(void)
 
     uart_audio_selftest();
 
-    if (xTaskCreate(uart_audio_task, "uart_audio",
+    if (xTaskCreatePinnedToCore(uart_audio_task, "uart_audio",
                     UART_AUDIO_TASK_STACK, NULL,
-                    UART_AUDIO_TASK_PRIO, NULL) != pdPASS) {
+                    UART_AUDIO_TASK_PRIO, NULL, 1) != pdPASS) {
         ESP_LOGE(TAG, "failed to create task");
         return ESP_ERR_NO_MEM;
     }

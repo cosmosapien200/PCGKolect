@@ -1,5 +1,7 @@
 #include "audio.h"
 
+#include "esp_attr.h"
+
 #include "pcm1803.h"
 
 #include "esp_log.h"
@@ -34,7 +36,8 @@ struct audio_stream_s {
     struct audio_stream_s *next;
 };
 
-static int32_t s_ring[AUDIO_RING_SAMPLES];
+/* 64 KB: in PSRAM so internal RAM stays free for Wi-Fi + BLE */
+EXT_RAM_BSS_ATTR static int32_t s_ring[AUDIO_RING_SAMPLES];
 static uint64_t s_head = 0;           /* total canonical samples written */
 
 static SemaphoreHandle_t s_ring_lock = NULL;
@@ -120,9 +123,9 @@ esp_err_t audio_init(void)
         return ret;
     }
 
-    if (xTaskCreate(audio_producer_task, "audio_producer",
+    if (xTaskCreatePinnedToCore(audio_producer_task, "audio_producer",
                     AUDIO_PRODUCER_TASK_STACK, NULL,
-                    AUDIO_PRODUCER_TASK_PRIO, NULL) != pdPASS) {
+                    AUDIO_PRODUCER_TASK_PRIO, NULL, 1) != pdPASS) {
         ESP_LOGE(TAG, "failed to create producer task");
         return ESP_ERR_NO_MEM;
     }

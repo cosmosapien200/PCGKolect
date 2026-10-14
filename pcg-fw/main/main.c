@@ -11,6 +11,7 @@
 #include "wifi_sta.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "uart_audio.h"
 
 #define TAG "MAIN"
@@ -50,14 +51,17 @@ void app_main(void)
     ble_set_connect_cb(wifi_sta_rotate_token);
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(10000));
 
         uart_audio_stats_t st;
         uart_audio_get_stats(&st);
         size_t txfree = 0;
         uart_get_tx_buffer_free_size(UART_NUM_1, &txfree);
         ESP_LOGI(TAG, "uart_audio: frames=%" PRIu32 " read_err=%" PRIu32
-                 " write_err=%" PRIu32 " txfree=%u",
-                 st.frames_sent, st.read_errors, st.write_errors, (unsigned)txfree);
+                 " write_err=%" PRIu32 " txfree=%u heap_int=%u min=%u psram=%u",
+                 st.frames_sent, st.read_errors, st.write_errors, (unsigned)txfree,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
 }

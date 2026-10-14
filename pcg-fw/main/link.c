@@ -15,8 +15,8 @@ static const char *TAG = "link";
 #define LINK_PORT        UART_NUM_1
 #define LINK_TX_PIN      17
 #define LINK_RX_PIN      18
-#define LINK_RX_BUFFER   (16 * 1024)
-#define LINK_TX_BUFFER   (8 * 1024)
+#define LINK_RX_BUFFER   (8 * 1024)
+#define LINK_TX_BUFFER   (4 * 1024)
 #define LINK_RX_TASK_STACK 4096
 #define LINK_RX_TASK_PRIO  7       /* above audio consumers: it only parses */
 #define LINK_MAX_PENDING   4
@@ -239,9 +239,22 @@ static void handle_msg(uint8_t type, const uint8_t *data, size_t len)
     }
 }
 
+static uart_config_t s_cfg;
+static SemaphoreHandle_t s_installed;
+
 static void link_rx_task(void *arg)
 {
     (void)arg;
+    /* Installing the driver here puts the UART ISR on this task's core (1),
+     * away from Wi-Fi/BLE on core 0. At 4 Mbaud the 128-byte FIFO fills in
+     * 320 us, so the full threshold is lowered from 120 (20 us of headroom)
+     * to 32 (240 us). */
+    ESP_ERROR_CHECK(uart_driver_install(LINK_PORT, LINK_RX_BUFFER, LINK_TX_BUFFER, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(LINK_PORT, &s_cfg));
+    ESP_ERROR_CHECK(uart_set_pin(LINK_PORT, LINK_TX_PIN, LINK_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    uart_set_rx_full_threshold(LINK_PORT, 32);
+    uart_set_rx_timeout(LINK_PORT, 4);
+    xSemaphoreGive(s_installed);
     static uint8_t buf[1024];
     enum { S_SYNC0, S_SYNC1, S_HDR, S_BODY } st = S_SYNC0;
     bool is_msg = false;
@@ -387,12 +400,12 @@ esp_err_t link_read(uint32_t handle, uint32_t offset, uint32_t len,
         return ESP_ERR_NO_MEM;
     }
     esp_err_t ret = ESP_ERR_TIMEOUT;
-    for (int a = 0; a < 4; a++) {
+    for (int a = 0; a < 6; a++) {
         if (a > 0) {
             s_stats.req_retries++;
         }
         link_send_msg(LINK_T_REQ, txt, (size_t)tl);
-        if (xSemaphoreTake(p->sem, pdMS_TO_TICKS(250)) == pdTRUE) {
+        if (xSemaphoreTake(p->sem, pdMS_TO_TICKS(300)) == pdTRUE) {
             xSemaphoreTake(s_pend_lock, portMAX_DELAY);
             if (p->rsp) {                 /* RV answered with an error RSP */
                 *rsp_err = p->rsp;
@@ -571,15 +584,17 @@ esp_err_t link_init(void)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(uart_driver_install(LINK_PORT, LINK_RX_BUFFER, LINK_TX_BUFFER, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(LINK_PORT, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(LINK_PORT, LINK_TX_PIN, LINK_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    s_cfg = cfg;
+    s_installed = xSemaphoreCreateBinary();
     s_stats.baud = LINK_BAUD_DEFAULT;
 
     ESP_LOGI(TAG, "self-test: %s", link_selftest() ? "PASS" : "FAIL");
 
-    if (xTaskCreate(link_rx_task, "link_rx", LINK_RX_TASK_STACK, NULL, LINK_RX_TASK_PRIO, NULL) != pdPASS ||
-        xTaskCreate(link_supervisor_task, "link_sup", 4096, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreatePinnedToCore(link_rx_task, "link_rx", LINK_RX_TASK_STACK, NULL, LINK_RX_TASK_PRIO, NULL, 1) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(s_installed, portMAX_DELAY);
+    if (xTaskCreatePinnedToCore(link_supervisor_task, "link_sup", 4096, NULL, 4, NULL, 1) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "UART%d TX=%d RX=%d @ %d", LINK_PORT, LINK_TX_PIN, LINK_RX_PIN, LINK_BAUD_DEFAULT);
