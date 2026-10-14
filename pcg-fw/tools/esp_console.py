@@ -8,7 +8,7 @@ Opening the port does not reset the ESP (DTR/RTS held low).
 import argparse, sys, time
 import serial
 
-REPLY = ('RSP', 'FLOOD', 'RBENCH', 'BAUD', 'STATS', 'ERR')
+REPLY = ('RSP', 'FLOOD', 'RBENCH', 'BAUD', 'STATS', 'ERR', 'FETCH')
 
 def main():
     ap = argparse.ArgumentParser()
