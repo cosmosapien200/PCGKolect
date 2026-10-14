@@ -396,3 +396,34 @@ Verified over BLE: token only in bonded answers and rotated per connection, inva
 credentials rejected, absent network → failed/NO_AP_FOUND with retries, forget → off; audio
 link unaffected (10 frames/s, no new gaps). HTTP endpoints still need a network test on a
 real hotspot/LAN (no Wi-Fi adapter on the dev PC).
+
+---
+
+## 2026-10-14 — Real-phone integration (Xiaomi, Android 14)
+
+### BLE responses never arrived on the phone
+The phone negotiated MTU 517 and the ESP sent 514-byte notification fragments. The phone
+received only the small *last* fragment of every response (header `0x41`: LAST, index 1) and
+silently dropped the first. Telemetry (< 330 B, one fragment) arrived. The PC (BlueZ, MTU 23)
+never hit this. **Fix:** fragments are capped at 244 B (one LE data packet with DLE) on both
+ESP and app.
+
+### HTTP downloads stalled at ~15 KB/s, then failed
+With Wi-Fi + BLE active, 4 KB chunk reads from the RV failed repeatedly and the RV logged ~50
+lost audio frames/hour. The UART ISR shared core 0 with Wi-Fi/BLE, and the default RX FIFO
+full threshold (120 of 128 bytes) left only ~20 µs of latency budget at 4 Mbaud.
+**Fix:** the UART driver is installed from a task pinned to core 1 (so its ISR lives there),
+the full threshold is 32 bytes (~240 µs), audio producer/sender and link tasks are pinned to
+core 1, chunk reads retry 6 × 300 ms.
+
+### Internal RAM exhaustion
+After the BLE + Wi-Fi + HTTP stack was added, free internal RAM was 21 KB: Wi-Fi association
+(`m f assoc req`) and the BLE controller (`Malloc failed`) failed. Putting the UART ISR in
+IRAM made it worse and was reverted. **Fix:** the 64 KB audio ring is in PSRAM
+(`EXT_RAM_BSS_ATTR`), Wi-Fi/LWIP may allocate from PSRAM, link buffers shrank → 101 KB free.
+
+### Result (end to end with the app)
+Pair → activate dataset → auto-start on a real heart → DONE (30.7 s usable, 37 beats) →
+download over the phone hotspot at ~62 KB/s with SHA-256 verification and resume. Audio link
+over 60 s with Wi-Fi up: 0 lost frames, 0 CRC errors. After a reset the ESP rejoins the
+hotspot from NVS in ~4 s.
