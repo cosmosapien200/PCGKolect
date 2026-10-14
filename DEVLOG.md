@@ -353,3 +353,23 @@ reboot) and renegotiate.
   start from a random base per boot.
 * Opening `/dev/ttyACM0` resets the ESP (auto-reset circuit); tests that need
   continuity run in one console session.
+
+---
+
+## 2026-10-14 — BLE control service (CP3)
+
+* NimBLE peripheral (`ble.c`), service `7a1c0001-…` with Info / Command / Response /
+  Telemetry / Wi-Fi characteristics; JSON messages fragmented with a 1-byte header
+  (FIRST/LAST/index) so they work at any MTU (tested at BlueZ's default 23).
+* Command characteristic requires an encrypted link (LE Secure Connections, Just Works,
+  bonds persisted in NVS); `delete`, `clear`, `wifi_*` additionally require a bonded link.
+* Commands are queued from the GATT callback and handled on `ble_cmd`: `hello` merges ESP
+  info (device id from the BT MAC, firmware, link state) with the RV `hello`; other ops are
+  forwarded over the link with the app's id restored in the answer.
+* Telemetry: RV status events are tagged `"src":"rv","link_up":true` and notified at ≤ 5 Hz;
+  with the link down the ESP sends its own `LINK_DEGRADED` status every 2 s.
+* PSRAM (2 MB, quad) enabled; NimBLE allocates from it.
+* `tools/ble_client.py` (bleak): desk test client — pair, run ops, print telemetry.
+
+Verified from a Linux PC: pair + bond, hello/status/manifest, guarded delete rejected by the
+RV, unknown op → UNSUPPORTED, telemetry notifications, writes refused before pairing.

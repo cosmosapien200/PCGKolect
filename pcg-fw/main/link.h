@@ -84,7 +84,8 @@ bool link_is_up(void);
 /* Switch the link baud rate (negotiated with the RV, reverts on failure). */
 esp_err_t link_set_baud(uint32_t baud);
 
-void link_set_event_cb(link_event_cb_t cb);
+/* Up to 3 subscribers receive every EVT frame (called on the link RX task). */
+void link_add_event_cb(link_event_cb_t cb);
 void link_set_chunk_cb(link_chunk_cb_t cb);
 uint32_t link_next_id(void);
 void link_get_stats(link_stats_t *out);

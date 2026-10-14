@@ -37,7 +37,7 @@ static SemaphoreHandle_t s_tx_lock;
 static SemaphoreHandle_t s_pend_lock;
 static pending_t         s_pend[LINK_MAX_PENDING];
 static link_stats_t      s_stats;
-static link_event_cb_t   s_evt_cb;
+static link_event_cb_t   s_evt_cb[3];
 static link_chunk_cb_t   s_chunk_cb;
 static uint32_t          s_next_id = 1;
 static uint8_t           s_msg_seq;
@@ -225,8 +225,10 @@ static void handle_msg(uint8_t type, const uint8_t *data, size_t len)
         deliver_rsp((const char *)data, len);
         break;
     case LINK_T_EVT:
-        if (s_evt_cb) {
-            s_evt_cb((const char *)data, len);
+        for (int i = 0; i < 3; i++) {
+            if (s_evt_cb[i]) {
+                s_evt_cb[i]((const char *)data, len);
+            }
         }
         break;
     case LINK_T_CHUNK:
@@ -518,7 +520,15 @@ static void link_supervisor_task(void *arg)
     }
 }
 
-void link_set_event_cb(link_event_cb_t cb) { s_evt_cb = cb; }
+void link_add_event_cb(link_event_cb_t cb)
+{
+    for (int i = 0; i < 3; i++) {
+        if (s_evt_cb[i] == NULL) {
+            s_evt_cb[i] = cb;
+            return;
+        }
+    }
+}
 void link_set_chunk_cb(link_chunk_cb_t cb) { s_chunk_cb = cb; }
 
 void link_get_stats(link_stats_t *out)

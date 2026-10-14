@@ -299,7 +299,7 @@ esp_err_t console_init(void)
     if (!uart_is_driver_installed(CON_PORT)) {
         ESP_ERROR_CHECK(uart_driver_install(CON_PORT, 2048, 0, 0, NULL, 0));
     }
-    link_set_event_cb(on_evt);
+    link_add_event_cb(on_evt);
     link_set_chunk_cb(on_chunk);
     if (xTaskCreate(console_task, "console", 6144, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
