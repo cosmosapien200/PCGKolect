@@ -60,12 +60,14 @@ static bool s_tlm_new;
 static char s_wifi[WIFI_MAX] = "{\"state\":\"off\"}";
 static char s_info[INFO_MAX] = "{}";
 static ble_local_op_t s_local;
+static void (*s_connect_cb)(void);
 
 static void advertise(void);
 
 const char *ble_device_id(void) { return s_device_id; }
 bool ble_connected(void) { return s_conn != BLE_HS_CONN_HANDLE_NONE; }
 void ble_set_local_handler(ble_local_op_t fn) { s_local = fn; }
+void ble_set_connect_cb(void (*cb)(void)) { s_connect_cb = cb; }
 
 static bool link_bonded(void)
 {
@@ -207,6 +209,9 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         if (ev->connect.status == 0) {
             s_conn = ev->connect.conn_handle;
             ESP_LOGI(TAG, "connected");
+            if (s_connect_cb) {
+                s_connect_cb();
+            }
         } else {
             advertise();
         }

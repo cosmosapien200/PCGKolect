@@ -373,3 +373,26 @@ reboot) and renegotiate.
 
 Verified from a Linux PC: pair + bond, hello/status/manifest, guarded delete rejected by the
 RV, unknown op → UNSUPPORTED, telemetry notifications, writes refused before pairing.
+
+---
+
+## 2026-10-14 — Wi-Fi station + local HTTP API (CP4)
+
+* `wifi_sta.c`: station mode on the phone hotspot. `wifi_set` (bonded BLE only) stores the
+  credentials in our own NVS namespace (Wi-Fi driver storage = RAM) so the device rejoins
+  after reboot; `wifi_forget` erases them. Reconnect with backoff (2 s → 10 s → 30 s) and
+  states off/connecting/connected/failed with reasons (NO_AP_FOUND, AUTH_FAILED, …), notified
+  on the Wi-Fi characteristic. Modem sleep is kept (required with BLE coexistence).
+* HTTP bearer token: 128-bit random, rotated on every BLE connection, returned only in the
+  `wifi_status` answer on a bonded link (never in notifications/logs); compared in constant time.
+* `http_api.c` (`esp_http_server`, port 8080, one request at a time, priority below audio):
+  `/v1/health`, `/v1/device`, `/v1/stats` (RV stats + ESP heap/RSSI/link counters),
+  `/v1/recordings` (pages the RV manifest), `/v1/recordings/{id}/{audio|metadata|sidecars/…}`
+  streamed in 4 KB link reads with `Content-Length`, `Range` → 206, `X-Content-SHA256`,
+  `POST /v1/transfers/{id}/{ack|delete}`, `POST /v1/recordings/clear`. RV statuses map to
+  HTTP 400/404/409/502/503/504.
+
+Verified over BLE: token only in bonded answers and rotated per connection, invalid
+credentials rejected, absent network → failed/NO_AP_FOUND with retries, forget → off; audio
+link unaffected (10 frames/s, no new gaps). HTTP endpoints still need a network test on a
+real hotspot/LAN (no Wi-Fi adapter on the dev PC).

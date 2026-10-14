@@ -27,6 +27,9 @@ typedef bool (*ble_local_op_t)(const char *op, const cJSON *req, cJSON *rsp, boo
 esp_err_t ble_init(void);
 void ble_set_local_handler(ble_local_op_t fn);
 
+/* Called on every new BLE connection (e.g. to rotate the HTTP token). */
+void ble_set_connect_cb(void (*cb)(void));
+
 /* Push the current Wi-Fi status JSON (stored for reads, notified if subscribed). */
 void ble_notify_wifi(const char *json);
 

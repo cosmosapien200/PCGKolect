@@ -8,6 +8,7 @@
 #include "link.h"
 #include "console.h"
 #include "ble.h"
+#include "wifi_sta.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
 #include "uart_audio.h"
@@ -43,6 +44,10 @@ void app_main(void)
 
     // BLE control service for the phone app
     ESP_ERROR_CHECK(ble_init());
+
+    // Wi-Fi station on the phone hotspot + local HTTP API (credentials via BLE)
+    ESP_ERROR_CHECK(wifi_sta_init());
+    ble_set_connect_cb(wifi_sta_rotate_token);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(30000));
