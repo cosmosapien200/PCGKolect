@@ -309,3 +309,47 @@ Resulting layout:
 * `i2s_channel_read()` returns one DMA block at a time.
 * Verify clock tree before debugging higher-level audio issues.
 * ESP-IDF I2S DMA is often sufficient without an additional ring buffer.
+
+---
+
+## 2026-10-14 — RV1103 link v1: typed frames, 4 Mbaud, control plane
+
+Goal: carry control commands, telemetry and recording-file transfer on the
+**existing** duplex UART (GPIO17 TX / GPIO18 RX ↔ RV `/dev/ttyS3`) without
+breaking the audio stream. Spec: `PCGKolect_app/docs/PROTOCOL.md`.
+
+### What changed
+* `uart_com.c` replaced by `link.c`: one TX mutex so whole frames never
+  interleave, an RX parser for RV→ESP frames, request/response with ids,
+  retries and timeouts, chunk reads, and a supervisor task.
+* New message frame `A5 5C | LEN | TYPE | SEQ | DATA | CRC16` alongside the
+  unchanged audio frame `A5 5A`. Types: REQ, RSP, EVT, CHUNK.
+* `console.c`: debug console on UART0 (`req <json>`, `baud`, `flood`,
+  `rbench`, `stats`), driven from the PC by `tools/esp_console.py`.
+* Flash size corrected to 16 MB (`esptool flash-id`), custom partition table
+  with a 4 MB factory app for the coming BLE + Wi-Fi stack.
+
+### Baud benchmark (audio streaming, RV NPU running)
+
+| Baud | RV→ESP stream | request/response | errors |
+|---|---|---|---|
+| 460 800 | 40 KB/s | 32 KB/s | 0 |
+| 1 500 000 | 129 KB/s | 79 KB/s | 2 audio frames |
+| 3 000 000 | 254 KB/s | 100 KB/s | 0 |
+| **4 000 000** | **334 KB/s** | **128 KB/s** | **0 in 18 MB soak** |
+
+RV1103 UART3 clocks are exact at 1.5/3/4 Mbaud and 4 Mbaud is exact on the
+ESP32-S3 (80 MHz / 20), so 4 Mbaud is the target. Both sides boot at 460800;
+the supervisor negotiates up, and both fall back after silence (ESP or RV
+reboot) and renegotiate.
+
+### Bugs found on the way
+* **Console starvation:** `uart_flush_input()` waits on the driver RX mutex
+  that the higher-priority `link_rx` task re-takes in a loop, so the console
+  task hung while holding the TX lock and audio stopped. Removed the flush;
+  the parser resynchronises by itself.
+* **Response replay after reboot:** the RV caches responses by request id;
+  after an ESP reset ids restarted at 1 and old answers were replayed. Ids now
+  start from a random base per boot.
+* Opening `/dev/ttyACM0` resets the ESP (auto-reset circuit); tests that need
+  continuity run in one console session.

@@ -1,7 +1,7 @@
 #include "uart_audio.h"
 
 #include "audio.h"
-#include "uart_com.h"
+#include "link.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -26,24 +26,6 @@ static uint8_t s_frame[UART_AUDIO_FRAME_BYTES];
    FRAMING
    ========================= */
 
-static uint16_t crc16_ccitt_false(const uint8_t *data, size_t len)
-{
-    uint16_t crc = 0xFFFF;
-
-    for (size_t i = 0; i < len; i++) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (int j = 0; j < 8; j++) {
-            if (crc & 0x8000) {
-                crc = (uint16_t)((crc << 1) ^ 0x1021);
-            } else {
-                crc = (uint16_t)(crc << 1);
-            }
-        }
-    }
-
-    return crc;
-}
-
 /* Build a frame into `out` and return its total size in bytes.
  * `len` is the PCM payload length in bytes (even). */
 static size_t build_frame(uint8_t *out, const int16_t *pcm,
@@ -59,7 +41,7 @@ static size_t build_frame(uint8_t *out, const int16_t *pcm,
      * required order. */
     memcpy(&out[5], pcm, len);
 
-    uint16_t crc = crc16_ccitt_false(&out[2], (size_t)3 + len);
+    uint16_t crc = link_crc16(&out[2], (size_t)3 + len);
     out[5 + len]     = (uint8_t)(crc & 0xFF);
     out[5 + len + 1] = (uint8_t)(crc >> 8);
 
@@ -69,7 +51,7 @@ static size_t build_frame(uint8_t *out, const int16_t *pcm,
 /* Validate CRC + framing against the receiver spec's test vectors. */
 static void uart_audio_selftest(void)
 {
-    bool ok = crc16_ccitt_false((const uint8_t *)"123456789", 9) == 0x29B1;
+    bool ok = link_crc16((const uint8_t *)"123456789", 9) == 0x29B1;
 
     static const uint8_t expect[] = {
         0xA5, 0x5A, 0x04, 0x00, 0x01, 0x01, 0x00, 0x02, 0x00, 0x8F, 0x8A
@@ -104,7 +86,7 @@ static void uart_audio_task(void *arg)
 
         size_t n = build_frame(s_frame, s_pcm, UART_AUDIO_PAYLOAD_BYTES, seq++);
 
-        if (uart_com_write(s_frame, n) != ESP_OK) {
+        if (link_write_frame(s_frame, n) != ESP_OK) {
             s_stats.write_errors++;
             continue;
         }
