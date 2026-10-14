@@ -88,7 +88,14 @@ static void notify_fragments(uint16_t handle, const char *data, size_t len)
         return;
     }
     size_t mtu = ble_att_mtu(s_conn);
-    size_t chunk = (mtu > 4 ? mtu - 3 : 20) - 1;
+    /* Cap fragments at 244 B (one LE data packet with DLE). Some phones (seen on
+     * a Xiaomi/Android 14) negotiate MTU 517 yet silently drop larger
+     * notifications. */
+    size_t chunk = (mtu > 4 ? mtu - 3 : 20);
+    if (chunk > 244) {
+        chunk = 244;
+    }
+    chunk -= 1;
     uint8_t frag[520];
     if (chunk > sizeof(frag) - 1) {
         chunk = sizeof(frag) - 1;
@@ -110,6 +117,7 @@ static void notify_fragments(uint16_t handle, const char *data, size_t len)
                 break;
             }
             if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EBUSY) {
+                ESP_LOGW(TAG, "notify failed rc=%d", rc);
                 return;                     /* disconnected */
             }
             vTaskDelay(pdMS_TO_TICKS(10));
